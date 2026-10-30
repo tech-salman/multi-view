@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Multi Viewer</title>
+<style>
+html, body { height: 100%; background: #000; }
+body { margin: 0; background: #000; color: #fff; font-family: sans-serif; height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+.container { width: 100%; max-width: none; margin: 0; padding: 10px; box-sizing: border-box; flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.input-wrapper { display: flex; gap: 10px; flex-wrap: nowrap; flex-shrink: 0; }
+input, button { padding: 12px 16px; border-radius: 8px; border: 1px solid #333; font-size: 16px; outline: none; background: #111; color: #fff; }
+input[type="url"] { flex: 1; min-width: 0; }
+input[type="number"] { width: 80px; flex-shrink: 0; }
+button { background: #fff; color: #000; font-weight: 600; border: none; cursor: pointer; flex-shrink: 0; }
+#video-grid { display: grid; gap: 4px; margin-top: 10px; flex: 1; min-height: 0; display: none; }
+.video-box { background: #000; border-radius: 0; overflow: hidden; border: none; min-width: 0; min-height: 0; position: relative; }
+iframe { width: 100%; height: 100%; border: none; display: block; }
+.frame-scale { position: absolute; left: 0; top: 0; transform-origin: top left; }
+.fb-video, .fb-video iframe { width: 100% !important; height: 100% !important; }
+@media (max-width: 768px) {
+  input, button { padding: 10px 12px; font-size: 14px; }
+  input[type="number"] { width: 64px; }
+}
+</style>
+</head>
+<body>
+<div id="fb-root"></div>
+<div class="container">
+<div class="input-wrapper">
+<input type="url" id="fbUrl" placeholder="Paste any link">
+<input type="number" id="windowCount" value="4" min="1" max="25">
+<button onclick="generateFBViews()">Start Preview</button>
+</div>
+<div id="video-grid"></div>
+</div>
+<script>
+    // Universal: one link in, the right embed out. The grid, the
+    // Start button and the staggered 400ms starts are unchanged.
+    // Autoplay is muted where a platform allows it; Facebook still
+    // needs its SDK, because its plain iframe has no autoplay param.
+    const LB = { item: null, players: [], next: 0, timer: null };
+    function lbNormalize(raw) {
+        raw = (raw || '').trim();
+        if (!/^https?:\/\//i.test(raw)) raw = 'https://' + raw;
+        try { return new URL(raw); } catch (e) { return null; }
+    }
+    function lbDetect(raw) {
+        var u = lbNormalize(raw);
+        if (!u) return null;
+        var host = u.hostname.replace(/^www\./, '').toLowerCase();
+        var seg = u.pathname.split('/').filter(Boolean);
+        var parent = window.location.hostname || 'localhost';
+        if (/\.(mp4|webm|ogg|ogv|mov|m4v|m3u8)$/i.test(u.pathname)) {
+            return { kind: 'video', src: u.href };
+        }
+        if (host === 'youtube.com' || host === 'm.youtube.com' || host === 'music.youtube.com' || host === 'youtu.be' || host === 'youtube-nocookie.com') {
+            var id = u.searchParams.get('v');
+            if (!id && host === 'youtu.be') id = seg[0];
+            if (!id && (seg[0] === 'shorts' || seg[0] === 'live' || seg[0] === 'embed' || seg[0] === 'v')) id = seg[1];
+            var list = u.searchParams.get('list');
+            if (list && !id) return { kind: 'iframe', src: 'https://www.youtube.com/embed/videoseries?list=' + encodeURIComponent(list) + '&autoplay=1&mute=1' };
+            if (id) return { kind: 'iframe', src: 'https://www.youtube.com/embed/' + encodeURIComponent(id) + '?autoplay=1&mute=1&playsinline=1&rel=0' };
+        }
+        if (host.endsWith('facebook.com') || host === 'fb.watch' || host === 'fb.me') {
+            return { kind: 'facebook', href: u.href };
+        }
+        if (host === 'instagram.com') {
+            var iIdx = seg.indexOf('p');
+            if (iIdx < 0) iIdx = seg.indexOf('reel');
+            if (iIdx < 0) iIdx = seg.indexOf('reels');
+            if (iIdx < 0) iIdx = seg.indexOf('tv');
+            if (iIdx >= 0 && seg[iIdx + 1]) {
+                var igKind = seg[iIdx] === 'reels' ? 'reel' : seg[iIdx];
+                return { kind: 'iframe', src: 'https://www.instagram.com/' + igKind + '/' + encodeURIComponent(seg[iIdx + 1]) + '/embed' };
+            }
+        }
+        if (host.endsWith('tiktok.com')) {
+            var tIdx = seg.indexOf('video');
+            if (tIdx >= 0 && seg[tIdx + 1]) return { kind: 'iframe', src: 'https://www.tiktok.com/player/v1/' + encodeURIComponent(seg[tIdx + 1]) + '?autoplay=1&muted=1' };
+        }
+        if (host === 'x.com' || host === 'twitter.com') {
+            var sIdx = seg.indexOf('status');
+            if (sIdx < 0) sIdx = seg.indexOf('statuses');
+            if (sIdx >= 0 && seg[sIdx + 1]) return { kind: 'iframe', src: 'https://platform.twitter.com/embed/Tweet.html?id=' + encodeURIComponent(seg[sIdx + 1]) };
+        }
+        if (host === 'vimeo.com' || host === 'player.vimeo.com') {
+            var nums = seg.filter(function (s) { return /^\d+$/.test(s); });
+            if (nums.length) return { kind: 'iframe', src: 'https://player.vimeo.com/video/' + nums[nums.length - 1] + '?autoplay=1&muted=1&playsinline=1' };
+        }
+        if (host === 'dailymotion.com' || host === 'dai.ly') {
+            var dIdx = seg.indexOf('video');
+            if (dIdx >= 0 && seg[dIdx + 1]) return { kind: 'iframe', src: 'https://www.dailymotion.com/embed/video/' + encodeURIComponent(seg[dIdx + 1]) + '?autoplay=1&mute=1' };
+            if (host === 'dai.ly' && seg[0]) return { kind: 'iframe', src: 'https://www.dailymotion.com/embed/video/' + encodeURIComponent(seg[0]) + '?autoplay=1&mute=1' };
+        }
+        if (host === 'twitch.tv') {
+            if (seg[0] === 'videos' && seg[1]) return { kind: 'iframe', src: 'https://player.twitch.tv/?video=' + encodeURIComponent(seg[1]) + '&parent=' + encodeURIComponent(parent) + '&autoplay=true&muted=true' };
+            if (seg[1] === 'clip' && seg[2]) return { kind: 'iframe', src: 'https://clips.twitch.tv/embed?clip=' + encodeURIComponent(seg[2]) + '&parent=' + encodeURIComponent(parent) + '&autoplay=true&muted=true' };
+            if (seg[0]) return { kind: 'iframe', src: 'https://player.twitch.tv/?channel=' + encodeURIComponent(seg[0]) + '&parent=' + encodeURIComponent(parent) + '&autoplay=true&muted=true' };
+        }
+        if (host === 'clips.twitch.tv' && seg[0]) {
+            return { kind: 'iframe', src: 'https://clips.twitch.tv/embed?clip=' + encodeURIComponent(seg[0]) + '&parent=' + encodeURIComponent(parent) + '&autoplay=true&muted=true' };
+        }
+        if (host === 'linkedin.com') {
+            // LinkedIn blocks ordinary pages in a frame ("refused to connect").
+            // Only its own embed address works, and only for posts.
+            if (u.pathname.indexOf('/embed/feed/update/') === 0) {
+                return { kind: 'iframe', src: u.href };
+            }
+            var urn = u.href.match(/(urn:li:(?:activity|share|ugcPost):\d+)/);
+            if (urn) return { kind: 'iframe', src: 'https://www.linkedin.com/embed/feed/update/' + urn[1] };
+            var act = u.href.match(/activity-(\d+)/);
+            if (act) return { kind: 'iframe', src: 'https://www.linkedin.com/embed/feed/update/urn:li:activity:' + act[1] };
+            // Profiles, companies, feed, jobs, etc. have no embed address.
+            // Showing the raw URL would only give "refused to connect" again,
+            // so show an open-in-LinkedIn link instead of a blank frame.
+            return { kind: 'blocked', href: u.href, label: 'This LinkedIn page cannot be shown inside a frame.' };
+        }
+        return { kind: 'iframe', src: u.href, virtual: true };
+    }
+    var fbCallbacks = [], fbLoading = false;
+    function lbEnsureFB(cb) {
+        if (window.FB && FB.XFBML && FB.XFBML.parse) { cb(); return; }
+        fbCallbacks.push(cb);
+        if (fbLoading) return;
+        fbLoading = true;
+        var s = document.createElement('script');
+        s.async = true; s.defer = true; s.crossOrigin = 'anonymous';
+        s.src = 'https://connect.facebook.net/en_US/sdk.js#xfbml=1&version=v20.0';
+        s.onload = function () {
+            var q = fbCallbacks; fbCallbacks = [];
+            q.forEach(function (fn) { fn(); });
+        };
+        document.head.appendChild(s);
+    }
+    function lbParse(box) {
+        if (box.dataset.parsed) return;
+        if (window.FB && FB.XFBML && FB.XFBML.parse) {
+            box.dataset.parsed = '1';
+            FB.XFBML.parse(box);
+        } else {
+            lbEnsureFB(function () { lbParse(box); });
+        }
+    }
+    // Separate-browser zoom for generic sites: render the site at
+    // a real desktop width (1280px, or the cell width if larger),
+    // then scale that whole viewport down to fit the cell exactly.
+    // The site therefore lays out as on a desktop browser, not as
+    // a squeezed mobile column. Video/social embeds already adapt
+    // to their frame, so they are not scaled.
+    function lbRescaleBox(box) {
+        var wrap = box._scaleWrap;
+        if (!wrap) return;
+        var cw = box.clientWidth, ch = box.clientHeight;
+        if (!cw || !ch) return;
+        var vw = cw >= 1280 ? cw : 1280;
+        var vh = Math.round(vw * ch / cw);
+        wrap.style.width = vw + 'px';
+        wrap.style.height = vh + 'px';
+        wrap.style.transform = 'scale(' + (cw / vw) + ')';
+    }
+    function lbRescaleAll() {
+        LB.players.forEach(lbRescaleBox);
+    }
+    function lbStartNext() {
+        if (LB.next >= LB.players.length) return;
+        const box = LB.players[LB.next];
+        const item = LB.item;
+        if (item.kind === 'facebook') {
+            const player = document.createElement('div');
+            player.className = 'fb-video';
+            player.setAttribute('data-href', item.href);
+            player.setAttribute('data-width', Math.max(220, box.clientWidth || 500));
+            player.setAttribute('data-show-text', 'false');
+            player.setAttribute('data-autoplay', 'true');
+            player.setAttribute('data-allowfullscreen', 'true');
+            box.appendChild(player);
+            lbParse(box);
+        } else if (item.kind === 'blocked') {
+            const link = document.createElement('div');
+            link.textContent = item.label;
+            link.style.display = 'flex'; link.style.width = '100%'; link.style.height = '100%';
+            link.style.alignItems = 'center'; link.style.justifyContent = 'center';
+            link.style.textAlign = 'center'; link.style.padding = '16px';
+            link.style.boxSizing = 'border-box'; link.style.background = '#000';
+            link.style.color = '#e2e8f0'; link.style.textDecoration = 'none'; link.style.fontSize = '14px';
+            box.appendChild(link);
+        } else if (item.kind === 'video') {
+            const video = document.createElement('video');
+            video.src = item.src;
+            video.autoplay = true; video.muted = true; video.loop = true;
+            video.playsInline = true; video.controls = true; video.preload = 'auto';
+            video.style.width = '100%'; video.style.height = '100%';
+            video.style.objectFit = 'contain'; video.style.background = '#000';
+            box.appendChild(video);
+            video.play().catch(function () {});
+        } else {
+            // No sandbox: each iframe is its own browsing context
+            // (own window, document, scripts, history and navigation),
+            // so clicks, forms, logins, popups and in-page scripts work
+            // as on a real page. The expanded allow list lets the site
+            // request camera, mic, location, payment, etc. as it would
+            // in a normal browser tab (the browser still asks you first).
+            const iframe = document.createElement('iframe');
+            iframe.name = 'frame-' + (LB.next + 1);
+            iframe.title = 'Frame ' + (LB.next + 1);
+            iframe.src = item.src;
+            iframe.setAttribute('allow', 'accelerometer; autoplay; camera; clipboard-write; encrypted-media; fullscreen; geolocation; gyroscope; microphone; midi; payment; picture-in-picture; web-share; xr-spatial-tracking');
+            iframe.setAttribute('allowfullscreen', 'true');
+            iframe.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+            if (item.virtual) {
+                const wrap = document.createElement('div');
+                wrap.className = 'frame-scale';
+                box.appendChild(wrap);
+                wrap.appendChild(iframe);
+                box._scaleWrap = wrap;
+                lbRescaleBox(box);
+            } else {
+                box.appendChild(iframe);
+            }
+        }
+        LB.next++;
+        if (LB.next < LB.players.length) {
+            LB.timer = setTimeout(lbStartNext, 400);
+        }
+    }
+    // Fit every frame on one screen, no scrolling: pick the
+    // columns/rows whose cell shape is closest to 16:9 for the
+    // current screen size, then stretch the grid to fill all
+    // remaining height. Re-run on resize / rotation.
+    function lbLayout() {
+        var grid = document.getElementById('video-grid');
+        var n = LB.players.length;
+        if (!n || grid.style.display === 'none') return;
+        var availW = grid.clientWidth || window.innerWidth;
+        var availH = window.innerHeight - grid.getBoundingClientRect().top - 10;
+        if (availH < 100) availH = 100;
+        var best = null;
+        for (var cols = 1; cols <= n; cols++) {
+            var rows = Math.ceil(n / cols);
+            var cellAspect = (availW / cols) / (availH / rows);
+            var score = Math.abs(Math.log(cellAspect / (16 / 9))) + 0.05 * (cols * rows - n);
+            if (!best || score < best.score) best = { cols: cols, rows: rows, score: score };
+        }
+        grid.style.gridTemplateColumns = 'repeat(' + best.cols + ', 1fr)';
+        grid.style.gridTemplateRows = 'repeat(' + best.rows + ', 1fr)';
+        grid.style.height = availH + 'px';
+    }
+    window.addEventListener('resize', function () { lbLayout(); lbRescaleAll(); });
+    function generateFBViews() {
+        const raw = document.getElementById('fbUrl').value;
+        const count = document.getElementById('windowCount').value;
+        const grid = document.getElementById('video-grid');
+        const item = lbDetect(raw);
+        if (!item) {
+            alert("Please enter a valid link");
+            return;
+        }
+        LB.item = item;
+        clearTimeout(LB.timer);
+        LB.players = []; LB.next = 0;
+        grid.innerHTML = '';
+        grid.style.display = 'grid';
+        for (let i = 0; i < count; i++) {
+            const div = document.createElement('div');
+            div.className = 'video-box';
+            grid.appendChild(div);
+            LB.players.push(div);
+        }
+        // Size the grid to this screen first, so every frame
+        // fits on one screen with no scrolling, then start all.
+        lbLayout();
+        lbStartNext();
+    }
+</script>
+</body>
+</html>
